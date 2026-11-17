@@ -1,4 +1,6 @@
 import os
+from datetime import datetime
+
 import requests
 
 TOKEN = os.environ["BOT_TOKEN"]
@@ -14,6 +16,8 @@ HEADERS = {
     "Referer": "https://www.casino.org/",
 }
 STAKES = {7: 0.10, 8: 0.15, 9: 0.20, 10: 0.40}
+EXP_PER_CYCLE = -0.0112
+STD_PER_CYCLE = 0.433
 
 
 def send(text):
@@ -27,7 +31,7 @@ def send(text):
 def fetch(hours):
     spins = {}
     page = 0
-    while page < 300:
+    while page < 400:
         url = (
             f"{API_BASE}?page={page}&size=100"
             f"&sort=data.settledAt,desc&duration={hours}"
@@ -55,6 +59,10 @@ def fetch(hours):
 
 def dozen_of(n):
     return "0" if n == 0 else str((n - 1) // 12 + 1)
+
+
+def parse(iso):
+    return datetime.fromisoformat(iso.replace("Z", "+00:00"))
 
 
 def simulate(spins):
@@ -85,31 +93,57 @@ def simulate(spins):
 def report(hours):
     spins = fetch(hours)
     if len(spins) < 50:
-        return f"⚠️ برای {hours} ساعت داده‌ی کافی نیامد ({len(spins)} چرخش)."
+        return f"⚠️ برای {hours} ساعت داده‌ی کافی نیامد ({len(spins)} چرخش).", 0
+    actual = (parse(spins[-1][0]) - parse(spins[0][0])).total_seconds() / 3600
     bets, cycles = simulate(spins)
+    if not cycles:
+        return "⚠️ هیچ دوره‌ای کامل نشد.", actual
     wins = sum(1 for c in cycles if c > 0)
-    total = round(sum(c for c in cycles), 2)
+    total = round(sum(cycles), 2)
     staked = round(sum(b[0] for b in bets), 2)
     peak = cum = worst = 0.0
     for c in cycles:
         cum += c
         peak = max(peak, cum)
         worst = min(worst, cum - peak)
-    exp = round(len(cycles) * -0.0112, 2)
-    return (
-        f"🧪 شبیه‌سازی روی {hours} ساعت اخیر\n"
+    streak = best_streak = 0
+    for c in cycles:
+        if c < 0:
+            streak += 1
+            best_streak = max(best_streak, streak)
+        else:
+            streak = 0
+    exp = len(cycles) * EXP_PER_CYCLE
+    sigma = STD_PER_CYCLE * (len(cycles) ** 0.5)
+    z = (total - exp) / sigma
+    text = (
+        f"🧪 شبیه‌سازی (درخواست: {hours} ساعت، داده‌ی واقعی: {actual:.0f} ساعت)\n"
         f"چرخش‌های دریافتی: {len(spins)}\n"
         f"شرط‌ها: {len(bets)} | دوره‌ها: {len(cycles)}\n"
         f"دوره‌های با سود: {wins} | با باخت کامل: {len(cycles) - wins}\n"
         f"جمع پول گذاشته‌شده: {staked:.2f}€\n"
         f"سود/زیان کل: {total:+.2f}€\n"
+        f"بیشترین ضرر یک دوره: {min(cycles):.2f}€\n"
+        f"بیشترین باخت کامل پشت‌سرهم: {best_streak} دوره\n"
         f"بدترین افت پشت‌سرهم: {worst:.2f}€\n"
-        f"میانگین ریاضی برای این تعداد دوره: {exp:+.2f}€"
+        f"میانگین ریاضی برای این تعداد دوره: {exp:+.2f}€\n"
+        f"فاصله‌ی نتیجه از میانگین: {z:+.1f} انحراف معیار"
     )
+    return text, actual
 
 
-for h in (24, 72):
+prev = None
+for h in (24, 72, 168, 336):
     try:
-        send(report(h))
+        text, actual = report(h)
     except Exception as e:
         send(f"❌ خطا در شبیه‌سازی {h} ساعت:\n{str(e)[:300]}")
+        continue
+    if prev is not None and abs(actual - prev) < 2:
+        send(
+            f"ℹ️ برای {h} ساعت داده‌ی بیشتری نیامد؛ "
+            f"سقف داده‌ی سایت حدود {prev:.0f} ساعت است."
+        )
+        break
+    send(text)
+    prev = actual
