@@ -1,6 +1,9 @@
 name: Strategy Tests
 
 on:
+  push:
+    branches:
+      - strategy-test
   workflow_dispatch:
 
 permissions:
@@ -11,16 +14,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Get repository
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: strategy-test
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Run strategy tests
-        run: |
-          python -m unittest -v test_strategy.py
+      - name: Run tests
+        run: python -m unittest -v test_strategy.py
