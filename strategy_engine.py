@@ -1,12 +1,11 @@
 import json
 import os
-from datetime import datetime, timezone
 
-# تنظیمات استراتژی
 TRIGGER_ABSENCE = 6
 BET_STEPS = [10, 15, 20, 40]
-
 DOZENS = ("1", "2", "3")
+
+STATE_FILE = "strategy_state.json"
 
 
 def new_state():
@@ -28,156 +27,208 @@ def new_state():
     }
 
 
-def load_state(path):
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
+def load_state():
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
+
     return new_state()
 
 
-def save_state(state, path):
-    with open(path, "w", encoding="utf-8") as f:
+def save_state(state):
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
 def dozen_of(number):
     if number == 0:
         return "0"
+
     if 1 <= number <= 12:
         return "1"
+
     if 13 <= number <= 24:
         return "2"
+
     if 25 <= number <= 36:
         return "3"
-    raise ValueError("شماره باید بین صفر تا ۳۶ باشد")
+
+    raise ValueError("عدد باید بین صفر تا ۳۶ باشد")
 
 
 def process_spin(number, state):
+
     hit = dozen_of(number)
     messages = []
 
     for d in DOZENS:
+
         item = state["dozens"][d]
 
-        # چرخه فعال: نتیجه این دور، شرط قبلی را تعیین می‌کند.
+        # بررسی شرط فعال
         if item["active"]:
+
             stake = BET_STEPS[item["step"]]
 
-            # برد: فقط وقتی همان دوجین بیاید.
+            # حالت اول: برد
             if hit == d:
+
                 item["wins"] += 1
                 item["cycles_won"] += 1
+
+                # پرداخت خالص برد دوجین
                 item["profit"] += stake * 2
 
                 messages.append(
-                    f"دوجین {d}: برد با مبلغ {stake}؛ چرخه بسته شد."
+                    f"✅ دوجین {d}: برد با شرط {stake}"
+                )
+
+                messages.append(
+                    f"چرخه دوجین {d} بسته شد."
                 )
 
                 item["active"] = False
                 item["step"] = 0
                 item["absence"] = 0
 
+            # حالت دوم: صفر
+            elif hit == "0":
+
+                messages.append(
+                    f"🟡 دوجین {d}: صفر آمد؛ "
+                    "غیبت حساب شد، شرط باخت محسوب نشد."
+                )
+
+                # مرحله شرط تغییر نمی‌کند.
+
+            # حالت سوم: باخت
             else:
-                # صفر هم طبق قانون مورد توافق، غیبت حساب می‌شود.
+
                 item["losses"] += 1
                 item["profit"] -= stake
 
                 messages.append(
-                    f"دوجین {d}: باخت شرط {stake}."
+                    f"❌ دوجین {d}: باخت شرط {stake}"
                 )
 
                 item["step"] += 1
 
+                # چهارمین باخت
                 if item["step"] >= len(BET_STEPS):
+
                     item["cycles_lost"] += 1
+
+                    messages.append(
+                        f"⛔ دوجین {d}: چهار باخت متوالی؛ "
+                        "چرخه بسته شد."
+                    )
+
                     item["active"] = False
                     item["step"] = 0
                     item["absence"] = 0
 
-                    messages.append(
-                        f"دوجین {d}: چهار شرط باخت؛ چرخه بسته شد."
-                    )
-
-        # شمارش غیبت برای چرخه بعدی
+        # شمارش غیبت
         if hit == d:
             item["absence"] = 0
         else:
             item["absence"] += 1
 
-        # شروع چرخه جدید بعد از شش غیبت
-        if not item["active"] and item["absence"] >= TRIGGER_ABSENCE:
+        # شروع چرخه جدید پس از شش غیبت
+        if (
+            not item["active"]
+            and item["absence"] >= TRIGGER_ABSENCE
+        ):
+
             item["active"] = True
             item["step"] = 0
 
             messages.append(
-                f"دوجین {d}: شش غیبت کامل شد؛ "
-                f"شرط آزمایشی بعدی {BET_STEPS[0]}."
+                f"🚀 دوجین {d}: شش غیبت کامل شد. "
+                f"شرط آزمایشی بعدی: {BET_STEPS[0]}"
             )
 
     state["spins_processed"] += 1
+
     return messages
 
 
 def report(state):
+
     lines = [
         "📊 گزارش آزمایشی استراتژی رولت",
-        f"تعداد دورهای پردازش‌شده: {state['spins_processed']}",
-        ""
+        f"تعداد دورهای ثبت‌شده: {state['spins_processed']}",
+        "--------------------------------"
     ]
 
     for d in DOZENS:
+
         item = state["dozens"][d]
 
         if item["active"]:
-            next_bet = BET_STEPS[item["step"]]
-            status = f"فعال؛ شرط بعدی: {next_bet}"
+            status = (
+                f"فعال | شرط بعدی: "
+                f"{BET_STEPS[item['step']]}"
+            )
         else:
             status = "غیرفعال"
 
         lines.extend([
-            f"دوجین {d}:",
+            f"\n🎯 دوجین {d}",
             f"غیبت فعلی: {item['absence']}",
             f"وضعیت: {status}",
             f"برد شرط‌ها: {item['wins']}",
             f"باخت شرط‌ها: {item['losses']}",
-            f"چرخه‌های برده‌شده: {item['cycles_won']}",
+            f"چرخه‌های برنده: {item['cycles_won']}",
             f"چرخه‌های چهارباخت: {item['cycles_lost']}",
-            f"سود/زیان فرضی: {item['profit']}",
-            ""
+            f"سود یا زیان فرضی: {item['profit']}",
         ])
 
     return "\n".join(lines)
 
 
-if __name__ == "__main__":
-    state_file = "strategy_state.json"
-    state = load_state(state_file)
+def main():
 
-    print("موتور آزمایشی آماده است.")
-    print("برای خروج، عدد -1 را وارد کن.")
+    state = load_state()
+
+    print("🤖 موتور آزمایشی استراتژی آماده است.")
+    print("نتایج را از ۰ تا ۳۶ وارد کن.")
+    print("برای خروج عدد -1 را وارد کن.")
 
     while True:
+
+        raw = input("\nنتیجه رولت: ").strip()
+
+        if raw == "-1":
+            break
+
         try:
-            raw = input("\nشماره نتیجه رولت (0 تا 36): ").strip()
-
-            if raw == "-1":
-                break
-
             number = int(raw)
 
             if not 0 <= number <= 36:
                 print("عدد باید بین صفر تا ۳۶ باشد.")
                 continue
 
-            messages = process_spin(number, state)
-            save_state(state, state_file)
-
-            print("\n".join(messages) if messages else "نتیجه ثبت شد.")
-            print()
-            print(report(state))
-
         except ValueError:
             print("ورودی نامعتبر است.")
+            continue
 
-    print("\n" + report(state))
-    print("اطلاعات در strategy_state.json ذخیره شد.")
+        messages = process_spin(number, state)
+
+        save_state(state)
+
+        if messages:
+            for message in messages:
+                print(message)
+        else:
+            print("نتیجه ثبت شد.")
+
+        print("\n" + report(state))
+
+    save_state(state)
+
+    print("\nاطلاعات ذخیره شد.")
+    print(report(state))
+
+
+if __name__ == "__main__":
+    main()
