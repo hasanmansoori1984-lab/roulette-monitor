@@ -20,7 +20,19 @@ HEADERS = {
 }
 STATE_FILE = "state.json"
 RANGES = {"1": "1-12", "2": "13-24", "3": "25-36"}
-ALERTS = (7,)
+
+# آلارم فقط روی این غیبت‌ها
+ALERTS = (5,)
+
+# آمارگیری: بعد از رسیدن به این غیبت‌ها، STEPS چرخش بعدی رو دنبال کن
+TRIGGERS = (5, 7)
+STEPS = 4
+MAX_STREAK = 30
+REPORT_DAYS = 5
+
+# گزارش طول غیبت: (از، تا). مثلاً (5, 9) یعنی بین غیبت‌هایی که به ۵ رسیدن، چندتاشون تا ۹ تموم شدن
+BANDS = ((5, 9), (8, 12))
+
 POLL_SECONDS = 10
 RUN_SECONDS = int(5.5 * 3600)
 COMMIT_EVERY = 1200
@@ -42,22 +54,50 @@ def send(text):
         pass
 
 
+def new_trial_stats():
+    return {
+        "n": 0,
+        "wins": 0,
+        "by_step": {str(i): 0 for i in range(1, STEPS + 1)},
+    }
+
+
+def new_stats():
+    return {
+        "spins": 0,
+        "trials": {str(t): new_trial_stats() for t in TRIGGERS},
+        "streak": {},
+    }
+
+
+def fresh_state():
+    return {
+        "last": None,
+        "count": {"1": 0, "2": 0, "3": 0},
+        "offset": 0,
+        "error": False,
+        "active": [],
+        "stats": new_stats(),
+        "next_report": None,
+    }
+
+
 def load_state():
     try:
         with open(STATE_FILE, encoding="utf-8") as f:
             s = json.load(f)
-        s.setdefault("last", None)
-        s.setdefault("count", {"1": 0, "2": 0, "3": 0})
-        s.setdefault("offset", 0)
-        s.setdefault("error", False)
-        return s
     except Exception:
-        return {
-            "last": None,
-            "count": {"1": 0, "2": 0, "3": 0},
-            "offset": 0,
-            "error": False,
-        }
+        return fresh_state()
+    base = fresh_state()
+    for k, v in base.items():
+        s.setdefault(k, v)
+    st = s["stats"]
+    st.setdefault("spins", 0)
+    st.setdefault("trials", {})
+    st.setdefault("streak", {})
+    for t in TRIGGERS:
+        st["trials"].setdefault(str(t), new_trial_stats())
+    return s
 
 
 def save_state(state):
@@ -106,6 +146,10 @@ def fmt_age(sec):
     return f"{sec // 60} دقیقه"
 
 
+def pct(a, b):
+    return f"{a / b * 100:.1f}%" if b else "—"
+
+
 def status_text(state):
     lines = [
         f"دازن {d} ({RANGES[d]}): {state['count'][d]} غیبت" for d in "123"
@@ -116,15 +160,98 @@ def status_text(state):
     return text
 
 
+def stats_text(state):
+    st = state["stats"]
+    base_win = (1 - (25 / 37) ** STEPS) * 100
+    lines = [f"📈 آمار ({st['spins']} چرخش ثبت‌شده)"]
+
+    for t in TRIGGERS:
+        s = st["trials"][str(t)]
+        n, w = s["n"], s["wins"]
+        steps = " | ".join(
+            f"{i}: {s['by_step'][str(i)]}" for i in range(1, STEPS + 1)
+        )
+        lines += [
+            "",
+            f"🎯 بعد از {t} غیبت ({STEPS} مرحله)",
+            f"تعداد: {n} | برد: {w} ({pct(w, n)}) | باخت: {n - w} ({pct(n - w, n)})",
+            f"برد در هر مرحله ← {steps}",
+        ]
+
+    lines += [
+        "",
+        f"برد تصادفی مورد انتظار در {STEPS} مرحله: {base_win:.1f}%",
+    ]
+
+    # طول غیبت‌های تمام‌شده: غیبتی که با اومدن دازن تموم شده
+    ends = {int(k): v["hit"] for k, v in st["streak"].items()}
+
+    lines += ["", "📏 غیبت‌های تمام‌شده (طول = تعداد چرخش پشت‌سرهم بدون اومدن)"]
+    for a, b in BANDS:
+        total = sum(v for k, v in ends.items() if k >= a)
+        inside = sum(v for k, v in ends.items() if a <= k <= b)
+        beyond = total - inside
+        rand = (1 - (25 / 37) ** (b - a + 1)) * 100
+        lines += [
+            "",
+            f"غیبت‌های {a} به بالا: {total} بار",
+            f"تموم شد بین {a} تا {b}: {inside} ({pct(inside, total)})",
+            f"رفت بالاتر از {b}: {beyond} ({pct(beyond, total)})",
+            f"تموم شدن بین {a} تا {b} در حالت تصادفی: {rand:.1f}%",
+        ]
+
+    start = min(a for a, _ in BANDS)
+    total = sum(v for k, v in ends.items() if k >= start)
+    lines += ["", f"📊 توزیع طول غیبت (از {start} به بالا، تعداد و درصد)"]
+    for k in range(start, 21):
+        c = ends.get(k, 0)
+        lines.append(f"{k}: {c} ({pct(c, total)})")
+    rest = sum(v for k, v in ends.items() if k > 20)
+    lines.append(f"21+: {rest} ({pct(rest, total)})")
+    return "\n".join(lines)
+
+
 def process(spins, state, notify):
     count = state["count"]
+    st = state["stats"]
     for settled, n in spins:
         hit = dozen_of(n)
+        st["spins"] += 1
+
+        # ۱) مرحله‌ی تست‌های در حال اجرا رو جلو ببر
+        still = []
+        for tr in state["active"]:
+            tr["steps"] += 1
+            s = st["trials"][str(tr["trigger"])]
+            if tr["d"] == hit:
+                s["n"] += 1
+                s["wins"] += 1
+                s["by_step"][str(tr["steps"])] += 1
+            elif tr["steps"] >= STEPS:
+                s["n"] += 1
+            else:
+                still.append(tr)
+        state["active"] = still
+
+        # ۲) آمار هر دازن + غیبت‌ها + آلارم
         for d in "123":
+            k = count[d]
+            if k >= 1:
+                row = st["streak"].setdefault(
+                    str(min(k, MAX_STREAK)), {"reached": 0, "hit": 0}
+                )
+                row["reached"] += 1
+                if d == hit:
+                    row["hit"] += 1
+
             if d == hit:
                 count[d] = 0
             else:
                 count[d] += 1
+                if count[d] in TRIGGERS:
+                    state["active"].append(
+                        {"d": d, "trigger": count[d], "steps": 0}
+                    )
                 if notify and count[d] in ALERTS:
                     send(
                         f"⚠️ دازن {d} ({RANGES[d]}) به {count[d]} غیبت رسید\n"
@@ -141,7 +268,11 @@ def handle_commands(state):
         state["offset"] = u["update_id"] + 1
         msg = u.get("message") or {}
         text = (msg.get("text") or "").strip()
-        if str(msg.get("chat", {}).get("id")) == CHAT_ID and text.startswith("/status"):
+        if str(msg.get("chat", {}).get("id")) != CHAT_ID:
+            continue
+        if text.startswith("/stats"):
+            send(stats_text(state))
+        elif text.startswith("/status"):
             send(status_text(state))
 
 
@@ -150,6 +281,9 @@ def main():
     last_commit = time.time()
     state = load_state()
     fails = 0
+
+    if state["next_report"] is None:
+        state["next_report"] = time.time() + REPORT_DAYS * 86400
 
     while time.time() - start < RUN_SECONDS:
         try:
@@ -187,6 +321,10 @@ def main():
             handle_commands(state)
         except Exception:
             pass
+
+        if time.time() >= state["next_report"]:
+            send("📅 گزارش دوره‌ای\n\n" + stats_text(state))
+            state["next_report"] = time.time() + REPORT_DAYS * 86400
 
         if time.time() - last_commit > COMMIT_EVERY:
             commit_state(state)
