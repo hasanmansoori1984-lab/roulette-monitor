@@ -20,7 +20,7 @@ HEADERS = {
 }
 STATE_FILE = "state.json"
 RANGES = {"1": "1-12", "2": "13-24", "3": "25-36"}
-ALERTS = (5, 8)
+ALERTS = (7,)
 POLL_SECONDS = 10
 RUN_SECONDS = int(5.5 * 3600)
 COMMIT_EVERY = 1200
