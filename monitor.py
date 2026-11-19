@@ -33,6 +33,18 @@ REPORT_DAYS = 5
 # گزارش طول غیبت: (از، تا). مثلاً (5, 9) یعنی بین غیبت‌هایی که به ۵ رسیدن، چندتاشون تا ۹ تموم شدن
 BANDS = ((5, 9), (8, 12))
 
+# سابقه: وقتی غیبت به TRIGGERS رسید، LOOKBACK چرخش قبل از شروع غیبت رو بررسی کن
+LOOKBACK = 50
+# (از، تا، علامت): تعداد اومدن دازن توی LOOKBACK چرخش قبل از شروع غیبت
+#   16 یا بیشتر 🔴 | 14 و 15 ⚪ | 12 و 13 🟡 | 11 یا کمتر 🟢
+LB_LEVELS = (
+    (0, 11, "🟢"),
+    (12, 13, "🟡"),
+    (14, 15, "⚪"),
+    (16, 99, "🔴"),
+)
+HISTORY_KEEP = 80
+
 POLL_SECONDS = 10
 RUN_SECONDS = int(5.5 * 3600)
 COMMIT_EVERY = 1200
@@ -67,6 +79,7 @@ def new_stats():
         "spins": 0,
         "trials": {str(t): new_trial_stats() for t in TRIGGERS},
         "streak": {},
+        "lookback50": {},
     }
 
 
@@ -77,6 +90,7 @@ def fresh_state():
         "offset": 0,
         "error": False,
         "active": [],
+        "history": [],
         "stats": new_stats(),
         "next_report": None,
     }
@@ -95,6 +109,7 @@ def load_state():
     st.setdefault("spins", 0)
     st.setdefault("trials", {})
     st.setdefault("streak", {})
+    st.setdefault("lookback50", {})
     for t in TRIGGERS:
         st["trials"].setdefault(str(t), new_trial_stats())
     return s
@@ -150,6 +165,34 @@ def pct(a, b):
     return f"{a / b * 100:.1f}%" if b else "—"
 
 
+def lookback_hits(hist, d, t):
+    """دازن d در LOOKBACK چرخش قبل از شروع غیبت t تایی چند بار اومده"""
+    if len(hist) < t + LOOKBACK:
+        return None
+    window = hist[-(t + LOOKBACK):-t]
+    return sum(1 for x in window if x == d)
+
+
+def lb_level(lb):
+    for lo, hi, emoji in LB_LEVELS:
+        if lo <= lb <= hi:
+            return f"{lo}-{hi}", emoji
+    return None, "⚪"
+
+
+def record_lookback(st, tr, won):
+    lb = tr.get("lb")
+    if lb is None or tr.get("lbw") != LOOKBACK:
+        return
+    key, _ = lb_level(lb)
+    row = st["lookback50"].setdefault(str(tr["trigger"]), {}).setdefault(
+        key, {"n": 0, "wins": 0}
+    )
+    row["n"] += 1
+    if won:
+        row["wins"] += 1
+
+
 def status_text(state):
     lines = [
         f"دازن {d} ({RANGES[d]}): {state['count'][d]} غیبت" for d in "123"
@@ -183,6 +226,23 @@ def stats_text(state):
         f"برد تصادفی مورد انتظار در {STEPS} مرحله: {base_win:.1f}%",
     ]
 
+    lines += [
+        "",
+        f"🔎 تعداد اومدن دازن در {LOOKBACK} چرخش قبل از شروع غیبت "
+        f"(میانگین عادی: {LOOKBACK * 12 / 37:.1f})",
+        f"(برد = اومدن توی {STEPS} مرحله‌ی بعد از رسیدن به غیبت)",
+    ]
+    for t in TRIGGERS:
+        lines += ["", f"بعد از {t} غیبت:"]
+        rows = st["lookback50"].get(str(t), {})
+        for lo, hi, emoji in LB_LEVELS:
+            r = rows.get(f"{lo}-{hi}", {"n": 0, "wins": 0})
+            label = f"{lo}+" if hi >= LOOKBACK else f"{lo} تا {hi}"
+            lines.append(
+                f"{emoji} {label} بار: {r['n']} مورد | برد: {r['wins']} "
+                f"({pct(r['wins'], r['n'])})"
+            )
+
     # طول غیبت‌های تمام‌شده: غیبتی که با اومدن دازن تموم شده
     ends = {int(k): v["hit"] for k, v in st["streak"].items()}
 
@@ -214,9 +274,13 @@ def stats_text(state):
 def process(spins, state, notify):
     count = state["count"]
     st = state["stats"]
+    hist = state["history"]
     for settled, n in spins:
         hit = dozen_of(n)
         st["spins"] += 1
+        hist.append(hit)
+        if len(hist) > HISTORY_KEEP:
+            del hist[:-HISTORY_KEEP]
 
         # ۱) مرحله‌ی تست‌های در حال اجرا رو جلو ببر
         still = []
@@ -227,8 +291,10 @@ def process(spins, state, notify):
                 s["n"] += 1
                 s["wins"] += 1
                 s["by_step"][str(tr["steps"])] += 1
+                record_lookback(st, tr, True)
             elif tr["steps"] >= STEPS:
                 s["n"] += 1
+                record_lookback(st, tr, False)
             else:
                 still.append(tr)
         state["active"] = still
@@ -248,15 +314,32 @@ def process(spins, state, notify):
                 count[d] = 0
             else:
                 count[d] += 1
+                lb = lookback_hits(hist, d, count[d])
                 if count[d] in TRIGGERS:
                     state["active"].append(
-                        {"d": d, "trigger": count[d], "steps": 0}
+                        {
+                            "d": d,
+                            "trigger": count[d],
+                            "steps": 0,
+                            "lb": lb,
+                            "lbw": LOOKBACK,
+                        }
                     )
                 if notify and count[d] in ALERTS:
+                    head = "⚠️"
+                    lb_line = ""
+                    if lb is not None:
+                        _, emoji = lb_level(lb)
+                        head = f"⚠️ {emoji}"
+                        lb_line = (
+                            f"📌 توی {LOOKBACK} چرخش قبل از شروع غیبت: "
+                            f"{lb} بار اومده (میانگین عادی {LOOKBACK * 12 / 37:.1f})\n"
+                        )
                     send(
-                        f"⚠️ دازن {d} ({RANGES[d]}) به {count[d]} غیبت رسید\n"
+                        f"{head} دازن {d} ({RANGES[d]}) به {count[d]} غیبت رسید\n"
                         f"عدد آخر: {n}\n"
-                        f"⏱ {fmt_age(age_seconds(settled))} از پایان چرخش گذشته\n\n"
+                        + lb_line
+                        + f"⏱ {fmt_age(age_seconds(settled))} از پایان چرخش گذشته\n\n"
                         + status_text(state)
                     )
         state["last"] = settled
