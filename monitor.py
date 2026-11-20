@@ -50,10 +50,10 @@ WHEEL = [
     0, 32, 15, 19, 4, 21, 2, 25, 17, 34, 6, 27, 13, 36, 11, 30, 8, 23, 10,
     5, 24, 16, 33, 1, 20, 14, 31, 9, 22, 18, 29, 7, 28, 12, 35, 3, 26,
 ]
-# اندازه‌ی هر قسمت (جمعشون باید ۳۷ بشه): ۷ قسمت، ۵ تا ۵ تایی و ۲ تا ۶ تایی
-SECTOR_SIZES = (5, 5, 5, 5, 5, 6, 6)
+# اندازه‌ی هر قسمت (جمعشون باید ۳۷ بشه): ۴ قسمت، ۳ تا ۹ تایی و ۱ تا ۱۰ تایی
+SECTOR_SIZES = (9, 9, 9, 10)
 # آلارم قسمت‌ها: وقتی این‌قدر چرخش پشت‌سرهم توپ توی اون قسمت نیفتاد
-SECTOR_ALERTS = (15,)
+SECTOR_ALERTS = (10,)
 
 assert sum(SECTOR_SIZES) == len(WHEEL) == 37
 SECTORS = []
@@ -317,18 +317,23 @@ def process(spins, state, notify):
 
         # قسمت‌های چرخ
         hit_sector = SECTOR_OF[n]
+        alerted = []
         for i in range(len(SECTORS)):
             if i == hit_sector:
                 state["sectors"][i] = 0
             else:
                 state["sectors"][i] += 1
-                if notify and state["sectors"][i] in SECTOR_ALERTS:
-                    send(
-                        f"🎡 {sector_label(i)}\n"
-                        f"{state['sectors'][i]} چرخش پشت‌سرهم توپ توی این قسمت نیفتاد\n"
-                        f"عدد آخر: {n}\n"
-                        f"⏱ {fmt_age(age_seconds(settled))} از پایان چرخش گذشته"
-                    )
+                if state["sectors"][i] in SECTOR_ALERTS:
+                    alerted.append(i)
+        if notify:
+            for i in alerted:
+                send(
+                    f"🎡 {sector_label(i)}\n"
+                    f"{state['sectors'][i]} چرخش پشت‌سرهم توپ توی این قسمت نیفتاد\n"
+                    f"عدد آخر: {n}\n"
+                    f"⏱ {fmt_age(age_seconds(settled))} از پایان چرخش گذشته\n\n"
+                    + sectors_text(state)
+                )
 
         # ۱) مرحله‌ی تست‌های در حال اجرا رو جلو ببر
         still = []
