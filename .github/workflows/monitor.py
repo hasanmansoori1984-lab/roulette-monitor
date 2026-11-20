@@ -45,6 +45,24 @@ LB_LEVELS = (
 )
 HISTORY_KEEP = 80
 
+# قسمت‌های چرخ: ترتیب واقعی اعداد روی چرخ رولت اروپایی (از صفر)
+WHEEL = [
+    0, 32, 15, 19, 4, 21, 2, 25, 17, 34, 6, 27, 13, 36, 11, 30, 8, 23, 10,
+    5, 24, 16, 33, 1, 20, 14, 31, 9, 22, 18, 29, 7, 28, 12, 35, 3, 26,
+]
+# اندازه‌ی هر قسمت (جمعشون باید ۳۷ بشه): ۷ قسمت، ۵ تا ۵ تایی و ۲ تا ۶ تایی
+SECTOR_SIZES = (5, 5, 5, 5, 5, 6, 6)
+# آلارم قسمت‌ها: وقتی این‌قدر چرخش پشت‌سرهم توپ توی اون قسمت نیفتاد
+SECTOR_ALERTS = (15,)
+
+assert sum(SECTOR_SIZES) == len(WHEEL) == 37
+SECTORS = []
+_i = 0
+for _size in SECTOR_SIZES:
+    SECTORS.append(WHEEL[_i:_i + _size])
+    _i += _size
+SECTOR_OF = {num: idx for idx, sec in enumerate(SECTORS) for num in sec}
+
 POLL_SECONDS = 10
 RUN_SECONDS = int(5.5 * 3600)
 COMMIT_EVERY = 1200
@@ -91,6 +109,7 @@ def fresh_state():
         "error": False,
         "active": [],
         "history": [],
+        "sectors": [0] * len(SECTORS),
         "stats": new_stats(),
         "next_report": None,
     }
@@ -105,6 +124,8 @@ def load_state():
     base = fresh_state()
     for k, v in base.items():
         s.setdefault(k, v)
+    if len(s["sectors"]) != len(SECTORS):
+        s["sectors"] = [0] * len(SECTORS)
     st = s["stats"]
     st.setdefault("spins", 0)
     st.setdefault("trials", {})
@@ -191,6 +212,18 @@ def record_lookback(st, tr, won):
     row["n"] += 1
     if won:
         row["wins"] += 1
+
+
+def sector_label(i):
+    nums = " ".join(str(x) for x in SECTORS[i])
+    return f"قسمت {i + 1} ({nums})"
+
+
+def sectors_text(state):
+    lines = ["🎡 غیبت قسمت‌های چرخ (چرخش پشت‌سرهم بدون اومدن توپ)"]
+    for i in range(len(SECTORS)):
+        lines.append(f"{sector_label(i)}: {state['sectors'][i]}")
+    return "\n".join(lines)
 
 
 def status_text(state):
@@ -282,6 +315,21 @@ def process(spins, state, notify):
         if len(hist) > HISTORY_KEEP:
             del hist[:-HISTORY_KEEP]
 
+        # قسمت‌های چرخ
+        hit_sector = SECTOR_OF[n]
+        for i in range(len(SECTORS)):
+            if i == hit_sector:
+                state["sectors"][i] = 0
+            else:
+                state["sectors"][i] += 1
+                if notify and state["sectors"][i] in SECTOR_ALERTS:
+                    send(
+                        f"🎡 {sector_label(i)}\n"
+                        f"{state['sectors'][i]} چرخش پشت‌سرهم توپ توی این قسمت نیفتاد\n"
+                        f"عدد آخر: {n}\n"
+                        f"⏱ {fmt_age(age_seconds(settled))} از پایان چرخش گذشته"
+                    )
+
         # ۱) مرحله‌ی تست‌های در حال اجرا رو جلو ببر
         still = []
         for tr in state["active"]:
@@ -357,6 +405,8 @@ def handle_commands(state):
             send(stats_text(state))
         elif text.startswith("/status"):
             send(status_text(state))
+        elif text.startswith("/sectors"):
+            send(sectors_text(state))
 
 
 def main():
