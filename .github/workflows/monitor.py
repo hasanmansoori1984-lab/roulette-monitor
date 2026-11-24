@@ -22,7 +22,7 @@ STATE_FILE = "state.json"
 RANGES = {"1": "1-12", "2": "13-24", "3": "25-36"}
 
 # آلارم فقط روی این غیبت‌ها
-ALERTS = (5,)
+ALERTS = (4,)
 
 # آمارگیری: بعد از رسیدن به این غیبت‌ها، STEPS چرخش بعدی رو دنبال کن
 TRIGGERS = (5, 7)
@@ -34,15 +34,18 @@ REPORT_DAYS = 5
 BANDS = ((5, 9), (8, 12))
 
 # سابقه: وقتی غیبت به TRIGGERS رسید، LOOKBACK چرخش قبل از شروع غیبت رو بررسی کن
-LOOKBACK = 50
+LOOKBACK = 25
 # (از، تا، علامت): تعداد اومدن دازن توی LOOKBACK چرخش قبل از شروع غیبت
-#   16 یا بیشتر 🔴 | 14 و 15 ⚪ | 12 و 13 🟡 | 11 یا کمتر 🟢
+#   10 یا بیشتر 🔴 | 9 🟠 | 8 🟡 | 7 یا کمتر 🟢   (میانگین عادی حدود 8.8)
 LB_LEVELS = (
-    (0, 11, "🟢"),
-    (12, 13, "🟡"),
-    (14, 15, "⚪"),
-    (16, 99, "🔴"),
+    (0, 7, "🟢"),
+    (8, 8, "🟡"),
+    (9, 9, "🟠"),
+    (10, 99, "🔴"),
 )
+LB_KEY = f"lookback{LOOKBACK}"
+# میانگین واقعی: چرخش درست قبل از شروع غیبت همیشه اومدن همون دازنه (یعنی یکی ثابت + بقیه تصادفی)
+LB_AVG = 1 + (LOOKBACK - 1) * 12 / 37
 HISTORY_KEEP = 80
 
 # قسمت‌های چرخ: ترتیب واقعی اعداد روی چرخ رولت اروپایی (از صفر)
@@ -53,7 +56,7 @@ WHEEL = [
 # اندازه‌ی هر قسمت (جمعشون باید ۳۷ بشه): ۴ قسمت، ۳ تا ۹ تایی و ۱ تا ۱۰ تایی
 SECTOR_SIZES = (9, 9, 9, 10)
 # آلارم قسمت‌ها: وقتی این‌قدر چرخش پشت‌سرهم توپ توی اون قسمت نیفتاد
-SECTOR_ALERTS = (10,)
+SECTOR_ALERTS = (15,)
 
 assert sum(SECTOR_SIZES) == len(WHEEL) == 37
 SECTORS = []
@@ -97,7 +100,7 @@ def new_stats():
         "spins": 0,
         "trials": {str(t): new_trial_stats() for t in TRIGGERS},
         "streak": {},
-        "lookback50": {},
+        LB_KEY: {},
     }
 
 
@@ -130,7 +133,7 @@ def load_state():
     st.setdefault("spins", 0)
     st.setdefault("trials", {})
     st.setdefault("streak", {})
-    st.setdefault("lookback50", {})
+    st.setdefault(LB_KEY, {})
     for t in TRIGGERS:
         st["trials"].setdefault(str(t), new_trial_stats())
     return s
@@ -206,7 +209,7 @@ def record_lookback(st, tr, won):
     if lb is None or tr.get("lbw") != LOOKBACK:
         return
     key, _ = lb_level(lb)
-    row = st["lookback50"].setdefault(str(tr["trigger"]), {}).setdefault(
+    row = st[LB_KEY].setdefault(str(tr["trigger"]), {}).setdefault(
         key, {"n": 0, "wins": 0}
     )
     row["n"] += 1
@@ -262,15 +265,20 @@ def stats_text(state):
     lines += [
         "",
         f"🔎 تعداد اومدن دازن در {LOOKBACK} چرخش قبل از شروع غیبت "
-        f"(میانگین عادی: {LOOKBACK * 12 / 37:.1f})",
+        f"(میانگین عادی: {LB_AVG:.1f})",
         f"(برد = اومدن توی {STEPS} مرحله‌ی بعد از رسیدن به غیبت)",
     ]
     for t in TRIGGERS:
         lines += ["", f"بعد از {t} غیبت:"]
-        rows = st["lookback50"].get(str(t), {})
+        rows = st[LB_KEY].get(str(t), {})
         for lo, hi, emoji in LB_LEVELS:
             r = rows.get(f"{lo}-{hi}", {"n": 0, "wins": 0})
-            label = f"{lo}+" if hi >= LOOKBACK else f"{lo} تا {hi}"
+            if hi >= LOOKBACK:
+                label = f"{lo}+"
+            elif lo == hi:
+                label = f"{lo}"
+            else:
+                label = f"{lo} تا {hi}"
             lines.append(
                 f"{emoji} {label} بار: {r['n']} مورد | برد: {r['wins']} "
                 f"({pct(r['wins'], r['n'])})"
@@ -386,7 +394,8 @@ def process(spins, state, notify):
                         head = f"⚠️ {emoji}"
                         lb_line = (
                             f"📌 توی {LOOKBACK} چرخش قبل از شروع غیبت: "
-                            f"{lb} بار اومده (میانگین عادی {LOOKBACK * 12 / 37:.1f})\n"
+                            f"{lb} بار اومده | میانگین عادی: {LB_AVG:.1f} | "
+                            f"غیبت فعلی: {count[d]}\n"
                         )
                     send(
                         f"{head} دازن {d} ({RANGES[d]}) به {count[d]} غیبت رسید\n"
