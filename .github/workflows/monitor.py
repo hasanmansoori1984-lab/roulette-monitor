@@ -19,6 +19,8 @@ HEADERS = {
     "Referer": "https://www.casino.org/",
 }
 STATE_FILE = "state.json"
+SPINS_FILE = "numbers.txt"
+OLD_SPINS_FILE = "spins.csv"
 RANGES = {"1": "1-12", "2": "13-24", "3": "25-36"}
 
 # آلارم فقط روی این غیبت‌ها
@@ -147,7 +149,8 @@ def save_state(state):
 def commit_state(state):
     save_state(state)
     try:
-        subprocess.run(["git", "add", STATE_FILE], check=True)
+        files = [f for f in (STATE_FILE, SPINS_FILE) if os.path.exists(f)]
+        subprocess.run(["git", "add", *files], check=True)
         if subprocess.run(["git", "diff", "--cached", "--quiet"]).returncode != 0:
             subprocess.run(["git", "commit", "-q", "-m", "state"], check=True)
             subprocess.run(["git", "push", "-q"], check=True)
@@ -187,6 +190,56 @@ def fmt_age(sec):
 
 def pct(a, b):
     return f"{a / b * 100:.1f}%" if b else "—"
+
+
+def migrate_old_file():
+    """اگه فایل قدیمی spins.csv هست، فقط ستون عددهاش رو توی numbers.txt می‌ریزه"""
+    if os.path.exists(SPINS_FILE) or not os.path.exists(OLD_SPINS_FILE):
+        return
+    try:
+        with open(OLD_SPINS_FILE, encoding="utf-8") as f:
+            rows = f.read().splitlines()[1:]
+        with open(SPINS_FILE, "w", encoding="utf-8") as g:
+            for r in rows:
+                parts = r.split(",")
+                if len(parts) >= 2 and parts[1].strip().isdigit():
+                    g.write(parts[1].strip() + "\n")
+    except Exception:
+        pass
+
+
+def append_spins(spins):
+    """فقط خود عدد هر چرخش رو، هر عدد توی یه خط، آخر فایل numbers.txt اضافه می‌کنه"""
+    migrate_old_file()
+    with open(SPINS_FILE, "a", encoding="utf-8") as f:
+        for _, n in spins:
+            f.write(f"{n}\n")
+
+
+def saved_count():
+    try:
+        with open(SPINS_FILE, encoding="utf-8") as f:
+            return sum(1 for line in f if line.strip())
+    except Exception:
+        return 0
+
+
+def send_data():
+    migrate_old_file()
+    n = saved_count()
+    if n == 0:
+        send("هنوز داده‌ای ذخیره نشده.")
+        return
+    try:
+        with open(SPINS_FILE, "rb") as f:
+            requests.post(
+                f"https://api.telegram.org/bot{TOKEN}/sendDocument",
+                data={"chat_id": CHAT_ID, "caption": f"🗂 {n} عدد ذخیره‌شده"},
+                files={"document": ("numbers.txt", f)},
+                timeout=60,
+            )
+    except Exception:
+        send("ارسال فایل با خطا مواجه شد.")
 
 
 def lookback_hits(hist, d, t):
@@ -316,6 +369,7 @@ def process(spins, state, notify):
     count = state["count"]
     st = state["stats"]
     hist = state["history"]
+    append_spins(spins)
     for settled, n in spins:
         hit = dozen_of(n)
         st["spins"] += 1
@@ -421,6 +475,8 @@ def handle_commands(state):
             send(status_text(state))
         elif text.startswith("/sectors"):
             send(sectors_text(state))
+        elif text.startswith("/data"):
+            send_data()
 
 
 def main():
