@@ -24,10 +24,10 @@ OLD_SPINS_FILE = "spins.csv"
 RANGES = {"1": "1-12", "2": "13-24", "3": "25-36"}
 
 # آلارم فقط روی این غیبت‌ها
-ALERTS = (6,)
+ALERTS = (11,)
 
 # آمارگیری: بعد از رسیدن به این غیبت‌ها، STEPS چرخش بعدی رو دنبال کن
-TRIGGERS = (5, 7)
+TRIGGERS = (5, 7, 11)
 STEPS = 4
 MAX_STREAK = 30
 REPORT_DAYS = 5
@@ -48,7 +48,16 @@ LB_LEVELS = (
 LB_KEY = f"lookback{LOOKBACK}"
 # میانگین واقعی: چرخش درست قبل از شروع غیبت همیشه اومدن همون دازنه (یعنی یکی ثابت + بقیه تصادفی)
 LB_AVG = 1 + (LOOKBACK - 1) * 12 / 37
-HISTORY_KEEP = 80
+HISTORY_KEEP = 100
+
+# هشدار «غیبت طولانی»: توی LONG_WINDOW چرخش آخر چند بار (هر دازنی) غیبت LONG_MIN یا بیشتر داشتیم؟
+#   هیچ‌بار 🔴 (احتمال غیبت طولانی زیاده) | یک بار یا بیشتر 🟢 (احتمالش کمتره)
+# از غیبت LONG_WARN_FROM به بعد توی پیام آلارم میاد
+LONG_WINDOW = 80
+LONG_MIN = 15
+LONG_WARN_FROM = 11
+# آزمون: برای هر پنجره، ببین بعد از رسیدن به LONG_WARN_FROM غیبت، قرمز/سبز چقدر درست درآورده
+WARN_WINDOWS = (70, 80)
 
 # قسمت‌های چرخ: ترتیب واقعی اعداد روی چرخ رولت اروپایی (از صفر)
 WHEEL = [
@@ -84,7 +93,14 @@ def tg(method, **payload):
 
 def send(text):
     try:
-        tg("sendMessage", chat_id=CHAT_ID, text=text)
+        while text:
+            if len(text) <= 4000:
+                chunk, text = text, ""
+            else:
+                cut = text.rfind("\n", 0, 4000)
+                cut = cut if cut > 0 else 4000
+                chunk, text = text[:cut], text[cut:].lstrip("\n")
+            tg("sendMessage", chat_id=CHAT_ID, text=chunk)
     except Exception:
         pass
 
@@ -103,6 +119,7 @@ def new_stats():
         "trials": {str(t): new_trial_stats() for t in TRIGGERS},
         "streak": {},
         LB_KEY: {},
+        "warn": {},
     }
 
 
@@ -113,6 +130,7 @@ def fresh_state():
         "offset": 0,
         "error": False,
         "active": [],
+        "warn_active": [],
         "history": [],
         "sectors": [0] * len(SECTORS),
         "stats": new_stats(),
@@ -136,6 +154,7 @@ def load_state():
     st.setdefault("trials", {})
     st.setdefault("streak", {})
     st.setdefault(LB_KEY, {})
+    st.setdefault("warn", {})
     for t in TRIGGERS:
         st["trials"].setdefault(str(t), new_trial_stats())
     return s
@@ -242,6 +261,33 @@ def send_data():
         send("ارسال فایل با خطا مواجه شد.")
 
 
+def record_warn(st, tk, reached):
+    for w, green in tk["g"].items():
+        color = "green" if green else "red"
+        row = st["warn"].setdefault(w, {}).setdefault(color, {"n": 0, "reached": 0})
+        row["n"] += 1
+        if reached:
+            row["reached"] += 1
+
+
+def long_runs_in_last(hist, window, min_len):
+    """تعداد غیبت‌های min_len یا بیشتر (روی هر ۳ دازن) توی window چرخش آخر"""
+    if len(hist) < window:
+        return None
+    w = hist[-window:]
+    total = 0
+    for d in "123":
+        cur = 0
+        for x in w:
+            if x == d:
+                cur = 0
+            else:
+                cur += 1
+                if cur == min_len:
+                    total += 1
+    return total
+
+
 def lookback_hits(hist, d, t):
     """دازن d در LOOKBACK چرخش قبل از شروع غیبت t تایی چند بار اومده"""
     if len(hist) < t + LOOKBACK:
@@ -337,6 +383,23 @@ def stats_text(state):
                 f"({pct(r['wins'], r['n'])})"
             )
 
+    base_reach = (25 / 37) ** (LONG_MIN - LONG_WARN_FROM) * 100
+    lines += [
+        "",
+        f"🧪 آزمون هشدار: بعد از {LONG_WARN_FROM} غیبت، چند درصد به {LONG_MIN} رسید"
+        + (f" (همون باخت {STEPS} مرحله‌ای)" if LONG_MIN - LONG_WARN_FROM == STEPS else "")
+        + f"؟ (تصادفی: {base_reach:.1f}%)",
+    ]
+    for w in WARN_WINDOWS:
+        rows = st["warn"].get(str(w), {})
+        lines.append(f"پنجره {w} چرخش:")
+        for color, emoji, name in (("red", "🔴", "قرمز"), ("green", "🟢", "سبز")):
+            r = rows.get(color, {"n": 0, "reached": 0})
+            lines.append(
+                f"{emoji} {name}: {r['n']} مورد | رسید به {LONG_MIN}: "
+                f"{r['reached']} ({pct(r['reached'], r['n'])})"
+            )
+
     # طول غیبت‌های تمام‌شده: غیبتی که با اومدن دازن تموم شده
     ends = {int(k): v["hit"] for k, v in st["streak"].items()}
 
@@ -430,6 +493,15 @@ def process(spins, state, notify):
             else:
                 count[d] += 1
                 lb = lookback_hits(hist, d, count[d])
+                if count[d] == LONG_WARN_FROM:
+                    flags = {}
+                    for w in WARN_WINDOWS:
+                        nl_w = long_runs_in_last(hist, w, LONG_MIN)
+                        if nl_w is None:
+                            break
+                        flags[str(w)] = nl_w > 0
+                    else:
+                        state["warn_active"].append({"d": d, "g": flags})
                 if count[d] in TRIGGERS:
                     state["active"].append(
                         {
@@ -451,13 +523,40 @@ def process(spins, state, notify):
                             f"{lb} بار اومده | میانگین عادی: {LB_AVG:.1f} | "
                             f"غیبت فعلی: {count[d]}\n"
                         )
+                    long_line = ""
+                    if count[d] >= LONG_WARN_FROM:
+                        nl = long_runs_in_last(hist, LONG_WINDOW, LONG_MIN)
+                        if nl is not None:
+                            if nl == 0:
+                                long_line = (
+                                    f"🔴 هشدار قرمز: توی {LONG_WINDOW} چرخش آخر هیچ "
+                                    f"غیبت {LONG_MIN} تایی نبوده، احتمال غیبت طولانی زیاده\n"
+                                )
+                            else:
+                                long_line = (
+                                    f"🟢 هشدار سبز: توی {LONG_WINDOW} چرخش آخر {nl} بار "
+                                    f"غیبت {LONG_MIN} تایی یا بیشتر بوده، احتمالش کمتره\n"
+                                )
                     send(
                         f"{head} دازن {d} ({RANGES[d]}) به {count[d]} غیبت رسید\n"
                         f"عدد آخر: {n}\n"
                         + lb_line
+                        + long_line
                         + f"⏱ {fmt_age(age_seconds(settled))} از پایان چرخش گذشته\n\n"
                         + status_text(state)
                     )
+
+        # نتیجه‌ی آزمون هشدار: غیبت به LONG_MIN رسید یا قبلش تموم شد؟
+        keep = []
+        for tk in state["warn_active"]:
+            c = count[tk["d"]]
+            if c == 0:
+                record_warn(st, tk, False)
+            elif c >= LONG_MIN:
+                record_warn(st, tk, True)
+            else:
+                keep.append(tk)
+        state["warn_active"] = keep
         state["last"] = settled
 
 
